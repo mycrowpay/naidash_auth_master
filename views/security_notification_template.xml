@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+        <!-- Template for security update notification (password/login/mail changed, ...) -->
+        <template id="account_security_setting_update" inherit_id="mail.account_security_setting_update">
+            <xpath expr="." position="replace">
+                <p>
+                   <span>Dear <t t-out="user.name"/>,</span><br/><br/>
+                   <span t-out="security_update_text"/>
+                   <span>(<t
+                        t-out="update_datetime"
+                        t-options='{"widget": "datetime", "hide_seconds": True}'/>).
+                    </span>
+                    <br/>
+                   <span>If this was done by you:</span><br/>
+                   <ul>
+                       <li>You can safely ignore this message</li>
+                   </ul>
+                   <span>If this was not done by you:</span> 
+                   <ul class="o_mail_account_security_suggestions">
+                       <li>
+                           <span>We suggest you start by </span>
+                           <a t-att-href="user.get_app_1_base_url() + '/authentication/forgot-password'" target="_blank">
+                               Resetting Your Password
+                           </a>
+                       </li>
+                   </ul>
+                </p>
+            </xpath>
+        </template>
+    </data>
+</odoo>
+
+
+<!-- <?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data> -->
+        <!-- Extend the security update template to include 2fa suggestion -->
+        <!-- <template id="account_security_setting_update" inherit_id="mail.account_security_setting_update">
+            <xpath expr="//ul[hasclass('o_mail_account_security_suggestions')]/li[1]" position="after">
+                <li t-if="suggest_2fa">
+                    <span>Consider</span>
+                    <a href="https://www.odoo.com/documentation/17.0/applications/general/auth/2fa.html">
+                        activating Two-factor Authentication
+                    </a>
+                </li>
+            </xpath>
+        </template>
+    </data>
+</odoo> -->
