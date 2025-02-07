@@ -1,16 +1,23 @@
 import logging
+import shutil
+import time
+import psycopg2
 import requests
 import base64
 import random
 import string
 import subprocess
 import os
-
+import stat
+from pathlib import Path
 from datetime import datetime
-from odoo import models, _, fields, api
+from odoo import models, _, fields, api, registry, SUPERUSER_ID
+import odoo
 from odoo.http import request, SessionExpiredException
 from odoo.exceptions import AccessDenied, AccessError, ValidationError, UserError
 import odoo_master
+
+
 
 # try:
 #     import africastalking
@@ -50,11 +57,191 @@ class NaidashPartner(models.Model):
     )
     
     payment_url = fields.Char(string='Payment URL')
+    ###
+    def _get_script_path(self):
+        """Get and validate tenant creation script path"""
+        try:
+            # Get module path and navigate to root directory
+            current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # naidash_auth_master
+            root_dir = os.path.dirname(os.path.dirname(current_dir))  # odoo_master
+            script_path = os.path.join(root_dir, 'create_tenant.sh') 
+            
+            if not os.path.exists(script_path):
+                raise FileNotFoundError(
+                    f"Tenant creation script not found at {script_path}. "
+                    f"Please ensure the script exists and has proper permissions."
+                )
+            
+            logger.info(f"Found tenant creation script at: {script_path}")
+            return script_path
+            
+        except Exception as e:
+            logger.error(f"Error locating script: {str(e)}")
+            raise
+
+    def _validate_script_permissions(self, script_path):
+        """Verify and set proper script permissions"""
+        try:
+            script_stat = os.stat(script_path)
+            
+            # Check if script is executable
+            if not script_stat.st_mode & stat.S_IXUSR:
+                os.chmod(script_path, script_stat.st_mode | stat.S_IXUSR)
+            
+            # Check ownership
+            if script_stat.st_uid != os.getuid():
+                raise PermissionError("Script must be owned by Odoo process user")
+                
+            return True
+        except Exception as e:
+            logger.error(f"Permission validation failed: {str(e)}")
+            raise
         
+    def _validate_tenant_names(self, tenant_database, tenant_id):
+        """Validate tenant naming conventions"""
+        import re
+        
+        for name in [tenant_database, tenant_id]:
+            if not re.match(r'^[A-Z][A-Z0-9_]{3,63}$', name):
+                raise ValidationError(_(
+                    "Invalid tenant name format. Must start with uppercase letter and "
+                    "contain only uppercase letters, numbers, and underscores"
+                ))
+            
+            # Check reserved names
+            reserved = ['POSTGRES', 'TEMPLATE0', 'TEMPLATE1', 'ODOO']
+            if name.upper() in reserved:
+                raise ValidationError(_("Reserved name cannot be used for tenant"))
+        
+        return True
+
+    def _validate_tenant_password(self, password):
+        """Validate tenant password strength"""
+        if len(password) < 10:
+            raise ValidationError(_("Password must be at least 10 characters"))
+            
+        if not any(c.isupper() for c in password):
+            raise ValidationError(_("Password must contain uppercase letters"))
+            
+        if not any(c.isdigit() for c in password):
+            raise ValidationError(_("Password must contain numbers"))
+            
+        return True
+        
+    def _get_db_connection(self, db_name):
+        """Get database connection for tenant"""
+        try:
+            db = registry(db_name)
+            with db.cursor() as cr:
+                return cr
+        except Exception as e:
+            logger.error(f"Database connection error: {str(e)}")
+            raise
+
+    def _test_tenant_connection(self, tenant_database, tenant_id, tenant_password):
+        """Test tenant database connection"""
+        try:
+            # Give the database more time to initialize
+            time.sleep(15)
+            
+            # Test postgres connection first using default postgres credentials
+            try:
+                conn = psycopg2.connect(
+                    dbname='postgres',
+                    user='postgres',
+                    password='postgres',
+                    host='localhost'
+                )
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM pg_roles WHERE rolname = %s",
+                        (tenant_id.lower(),)
+                    )
+                    if not cur.fetchone():
+                        logger.info(f"Role {tenant_id.lower()} not found in postgres")
+                        return False
+                conn.close()
+            except Exception as e:
+                logger.error(f"Error checking postgres role: {str(e)}")
+                return False
+
+            # Test tenant database connection
+            try:
+                conn = psycopg2.connect(
+                    dbname=tenant_database.lower(),
+                    user=tenant_id.lower(),
+                    password=tenant_password,
+                    host='localhost'
+                )
+                with conn.cursor() as cur:
+                    cur.execute('SELECT 1')
+                conn.close()
+                return True
+            except Exception as e:
+                logger.error(f"Error connecting to tenant database: {str(e)}")
+                return False
+                    
+        except Exception as e:
+            logger.error(f"Tenant connection test failed: {str(e)}")
+            return False
+    
+    def _cleanup_failed_tenant(self, tenant_database, tenant_id):
+        """Clean up resources if tenant creation fails"""
+        try:
+            # Directory cleanup
+            current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            root_dir = os.path.dirname(os.path.dirname(current_dir))
+            tenant_dir = os.path.join(root_dir, 'tenants', tenant_database.lower())
+            
+            logger.info(f"Cleaning up tenant directory: {tenant_dir}")
+            
+            if os.path.exists(tenant_dir):
+                try:
+                    subprocess.run(
+                        ['docker-compose', 'down'],
+                        cwd=tenant_dir,
+                        check=True,
+                        capture_output=True
+                    )
+                    logger.info("Docker containers stopped successfully")
+                except subprocess.CalledProcessError as e:
+                    logger.error(f"Failed to stop containers: {e.stderr}")
+                
+                try:
+                    shutil.rmtree(tenant_dir)
+                    logger.info("Tenant directory removed successfully")
+                except OSError as e:
+                    logger.error(f"Failed to remove tenant directory: {e}")
+            
+            # Database cleanup
+            try:
+                with self.env.cr.savepoint():
+                    # Terminate existing connections
+                    self.env.cr.execute("""
+                        SELECT pg_terminate_backend(pid) 
+                        FROM pg_stat_activity 
+                        WHERE datname = %s
+                    """, (tenant_database.lower(),))
+                    
+                    # Drop database without quotes
+                    self.env.cr.execute("""
+                        DROP DATABASE IF EXISTS {}
+                    """.format(tenant_database.lower()))
+                    
+                    # Drop role without quotes
+                    self.env.cr.execute("""
+                        DROP ROLE IF EXISTS {}
+                    """.format(tenant_id.lower()))
+                    
+                logger.info(f"Database cleanup completed for tenant: {tenant_database}")
+            except Exception as e:
+                logger.error(f"Database cleanup failed: {str(e)}")
+                
+        except Exception as e:
+            logger.error(f"Cleanup failed: {str(e)}")
+    
     def create_the_partner(self, request_data):
-        """Create a partner
-        """ 
-        
+        """Create a partner with tenant setup for companies"""
         try:
             data = dict()
             response_data = dict()
@@ -67,15 +254,11 @@ class NaidashPartner(models.Model):
             tax_id = request_data.get("tax_id")
             account_type = request_data.get("account_type")
             tag_ids = request_data.get("tag_ids")
-            country_id = request_data.get("country_id")
-            state_id = request_data.get("county_id")#county/state
-            street = request_data.get("street_address")#address
-            # pick_up_address
-            # shipping_address
             
-            if account_type != "individual" and account_type != "company":
+            # Basic validation
+            if account_type not in ["individual", "company"]:
                 response_data["code"] = 400
-                response_data["message"] = "Account type is required!"
+                response_data["message"] = "Account type must be either 'individual' or 'company'"
                 return response_data
             
             if not partner_name:
@@ -93,24 +276,27 @@ class NaidashPartner(models.Model):
                 response_data["message"] = "Unsupported phone number format!"
                 return response_data
             
-            if isinstance(tag_ids, list) == False:
+            if not isinstance(tag_ids, list):
                 response_data["code"] = 422
                 response_data["message"] = "Expected a list of integer(s) in `tag_ids`"
                 return response_data
             
+            # Email duplication check
             if email:
                 query_params.append('|')
                 query_params.append(("email", "ilike", email))
                 
+            
+            # Phone number formatting
             country = self.env["res.country"].search([('code','=', 'KE')], order='id asc', limit=1)
-                
             if phone_number.startswith("01") or phone_number.startswith("07"):
                 country_code = str(country.phone_code)
                 phone_number = phone_number.replace('01', country_code, 1).replace('07', country_code, 1)
                 phone_number = phone_number.strip()
-                
+            
+            # Check for existing partner
             query_params.append(('phone','=', phone_number))
-            query_params.append(('mobile','=', phone_number))            
+            query_params.append(('mobile','=', phone_number))
             
             admin = self.env["res.users"].search([], order='id asc', limit=1)
             partner_account = self.env["res.partner"].search(query_params, order='id asc', limit=1)
@@ -119,7 +305,8 @@ class NaidashPartner(models.Model):
                 response_data["code"] = 409
                 response_data["message"] = "Account already exists!"
                 return response_data
-
+            
+            # Prepare partner details
             partner_details = {
                 "company_type": "person" if account_type == "individual" else account_type,
                 "name": (partner_name.strip()).title(),
@@ -132,52 +319,109 @@ class NaidashPartner(models.Model):
                 "tz": "Africa/Nairobi"
             }
             
+            # Handle tags
             if tag_ids:
                 tags = self.env['res.partner.category'].browse(tag_ids)
-                
                 if tags:
                     partner_details["category_id"] = [tag.id for tag in tags]
                 else:
                     response_data["code"] = 404
                     response_data["message"] = "Tag not found!"
                     return response_data
-                
+            
+            # Create partner
             partner = self.env['res.partner'].create(partner_details)
-
+            
             if partner:
-                tenant_password = "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
+                # Handle company-type partners with tenant creation
                 if partner.company_type == "company":
-                    tenant_id = "TID_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
-                    tenant_database = "TDB_" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
-                    partner.sudo().write(
-                        {
+                    try:
+                        # Generate tenant credentials
+                        tenant_id = "TID_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
+                        tenant_database = "TDB_" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
+                        tenant_password = "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
+                        
+                        # Validate tenant names and credentials
+                        self._validate_tenant_names(tenant_database, tenant_id)
+                        self._validate_tenant_password(tenant_password)
+                        
+                        # Get and validate script
+                        script_path = self._get_script_path()
+                        self._validate_script_permissions(script_path)
+                        
+                        # Update partner with tenant info
+                        partner.sudo().write({
                             "partner_database_name": tenant_database,
-                            "partner_primary_id": tenant_id, # username
-                            "partner_secondary_id": tenant_password, # password
-                        }
-                    )
-                    
-                    args = [tenant_database, tenant_id, tenant_password]
-                                        
-                    directory = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..'))
-                    script = 'create_tenant.sh'
-                    subprocess.call([f"{directory}/{script}"] + args, cwd=directory)
-                                    
+                            "partner_primary_id": tenant_id,
+                            "partner_secondary_id": tenant_password,
+                        })
+                        
+                        # Execute tenant creation
+                        try:
+                            args = [tenant_database.lower(), tenant_id.lower(), tenant_password]
+                            logger.info(f"Executing tenant creation script with args: {args}")
+                            env = os.environ.copy()
+                            env['PGPASSWORD'] = 'postgres'
+                            
+                            process = subprocess.run(
+                                [script_path] + args,
+                                capture_output=True,
+                                text=True,
+                                check=True,
+                                env=env
+                            )
+                            logger.info(f"Script output: {process.stdout}")
+                            
+                            # Give some time for the database to be fully ready
+                            time.sleep(10)
+                            
+                            # Test tenant connection
+                            if not self._test_tenant_connection(tenant_database, tenant_id, tenant_password):
+                                raise ValidationError(_("Tenant creation failed - connection test failed"))
+                                
+                        except subprocess.CalledProcessError as e:
+                            logger.error(f"Tenant creation script failed: {e.stderr}")
+                            self._cleanup_failed_tenant(tenant_database, tenant_id)
+                            raise ValidationError(_("Failed to create tenant environment")) from e
+                            
+                    except Exception as e:
+                        logger.error(f"Tenant creation failed: {str(e)}")
+                        # Attempt cleanup if tenant info was created
+                        if tenant_database and tenant_id:
+                            self._cleanup_failed_tenant(tenant_database, tenant_id)
+                        raise ValidationError(_("Failed to create tenant environment")) from e
+                
+                # Prepare success response
                 data['id'] = partner.id
+                if partner.company_type == "company":
+                    data.update({
+                        'tenant_database': partner.partner_database_name,
+                        'tenant_id': partner.partner_primary_id,
+                        'tenant_password': partner.partner_secondary_id
+                    })
+                
                 response_data["code"] = 201
                 response_data["message"] = "Partner created successfully"
                 response_data["data"] = data
             
             return response_data
+        
         except AccessDenied as e:
-            logger.error(f"AccessDenied error ocurred while creating the partner:\n\n{str(e)}")
-            raise e
+            logger.error(f"AccessDenied error occurred while creating the partner:\n\n{str(e)}")
+            raise
         except AccessError as e:
-            logger.error(f"AccessError ocurred while creating the partner:\n\n{str(e)}")
-            raise e
+            logger.error(f"AccessError occurred while creating the partner:\n\n{str(e)}")
+            raise
+        except ValidationError as e:
+            logger.error(f"Validation error occurred while creating the partner:\n\n{str(e)}")
+            response_data = {
+                "code": 400,
+                "message": str(e)
+            }
+            return response_data
         except Exception as e:
-            logger.error(f"An error ocurred while creating the partner:\n\n{str(e)}")
-            raise e
+            logger.error(f"An error occurred while creating the partner:\n\n{str(e)}")
+            raise
         
     def edit_the_partner(self, partner_id, request_data):
         """Edit the partner details
