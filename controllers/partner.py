@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 class NaidashPartner(http.Controller):
     @route('/api/v1/partner', methods=['POST'], auth='user', type='json')
     def create_partner(self, **kw):
+        request.env.cr.execute('SET LOCAL statement_timeout = 600000')  # 5 minutes
         """Create the partner details
         """ 
 
