@@ -62,6 +62,7 @@
                     <field name="partner_primary_id" placeholder="Partner's Primary ID" readonly="1"/>
                     <field name="partner_secondary_id" placeholder="Partner's Secondary ID" readonly="1"/>
                     <field name="partner_database_name" placeholder="Partner's Database Name" readonly="1"/>
+                    <field name="business_id" placeholder="Partner's Business ID" readonly="1"/>
                 </xpath>
 
                 <xpath expr="//field[@name='category_id']" position="after">
