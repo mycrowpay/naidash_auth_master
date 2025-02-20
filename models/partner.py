@@ -26,6 +26,7 @@ class NaidashPartner(models.Model):
     partner_primary_id = fields.Char(string="Partner's Primary ID")
     partner_secondary_id = fields.Char(string="Partner's Secondary ID")
     partner_database_name = fields.Char(string="Partner's Database Name")
+    business_id = fields.Char(string="Business ID", readonly=True) #Business partner_id
     reset_password_url = fields.Char(string='Reset Password URL')
     is_phone_number_verified = fields.Boolean(
         string = "Phone Number Verified?",
@@ -62,6 +63,44 @@ class NaidashPartner(models.Model):
                 raise ValidationError(_("Reserved name cannot be used for tenant"))
         
         return True
+    
+        #Generate Business ID
+    def _generate_business_id(self, company_name):
+        """Generate a unique business identifier from company name"""
+        import re
+        
+        # Convert to lowercase and remove any special characters
+        business_id = company_name.lower()
+        business_id = re.sub(r'[^a-z0-9\s]', '', business_id)
+        
+        # Take first word (or first 2 words if first word is too short)
+        parts = business_id.split()
+        if len(parts) > 0:
+            if len(parts[0]) < 4 and len(parts) > 1:
+                business_id = f"{parts[0]}{parts[1]}"
+            else:
+                business_id = parts[0]
+        
+        # Ensure minimum length
+        if len(business_id) < 4:
+            business_id += "".join(random.choices(string.ascii_lowercase, k=4-len(business_id)))
+        
+        # Validate and ensure uniqueness
+        business_id = self._validate_business_id(business_id)
+        
+        return business_id
+    
+        # method to generate timestamp-based identifiers
+    def _generate_tenant_identifiers(self, business_id):
+        """Generate tenant identifiers using business ID and timestamp"""
+        timestamp = datetime.now().strftime('%y%m%d%H%M')  # Format: YYMMDDHHmm
+        
+        # Generate identifiers
+        tenant_id = f"TID_{business_id}_{timestamp}"
+        tenant_database = f"TDB_{business_id}_{timestamp}"
+        
+        logger.info(f"Generated tenant identifiers - ID: {tenant_id}, DB: {tenant_database}")
+        return tenant_id, tenant_database
     
     def _validate_tenant_password(self, password):
         """Validate tenant password strength"""
@@ -626,6 +665,7 @@ class NaidashPartner(models.Model):
             tenant_database = None
             tenant_id = None
             tenant_password = None
+            business_id = None  # Initialize business_id
             
             # Validate request data first
             validation_result = self._validate_partner_data(request_data)
@@ -638,16 +678,24 @@ class NaidashPartner(models.Model):
                     "code": 409,
                     "message": "Account already exists!"
                 }
+            
+            # Prepare partner details first
+            partner_details = self._prepare_partner_details(request_data)
                 
             # For company accounts, create tenant first
             if request_data.get("account_type") == "company":
                 try:
-                    # Generate tenant credentials
-                    tenant_id = "TID_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
-                    tenant_database = "TDB_" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
+                    # Generate business ID from company name
+                    business_id = self._generate_business_id(request_data.get("name"))
+                    
+                    # Add business_id to partner details
+                    partner_details["business_id"] = business_id
+                    
+                    # Generate tenant credentials using business ID
+                    tenant_id, tenant_database = self._generate_tenant_identifiers(business_id)
                     tenant_password = self._generate_tenant_password()
                     
-                    logger.info(f"Generated tenant credentials - DB: {tenant_database}, ID: {tenant_id}")
+                    logger.info(f"Generated tenant credentials - Business ID: {business_id}, DB: {tenant_database}")
                     
                     # Validate tenant configuration
                     self._validate_tenant_names(tenant_database, tenant_id)
@@ -663,7 +711,7 @@ class NaidashPartner(models.Model):
                         tenant_database,
                         tenant_id,
                         tenant_password,
-                        timeout=300  # Increase timeout to 5 minutes
+                        timeout=300  # 5 minutes
                     )
                     
                     if not tenant_creation_result["success"]:
@@ -671,6 +719,13 @@ class NaidashPartner(models.Model):
                         raise ValidationError(tenant_creation_result["message"])
                         
                     logger.info(f"Tenant created successfully: {tenant_database}")
+                    
+                    # Add tenant info to partner details
+                    partner_details.update({
+                        "partner_database_name": tenant_database,
+                        "partner_primary_id": tenant_id,
+                        "partner_secondary_id": tenant_password,
+                    })
                         
                 except Exception as e:
                     logger.error(f"Failed to create tenant: {str(e)}")
@@ -680,17 +735,6 @@ class NaidashPartner(models.Model):
                         self._cleanup_failed_tenant(tenant_database, tenant_id)
                     raise ValidationError(_("Failed to create tenant environment")) from e
                     
-            # Prepare partner details
-            partner_details = self._prepare_partner_details(request_data)
-            
-            # Add tenant info if applicable
-            if tenant_database and tenant_id and tenant_password:
-                partner_details.update({
-                    "partner_database_name": tenant_database,
-                    "partner_primary_id": tenant_id,
-                    "partner_secondary_id": tenant_password,
-                })
-                
             # Create partner within a transaction
             with self.env.cr.savepoint():
                 partner = self.env['res.partner'].create(partner_details)
@@ -701,7 +745,8 @@ class NaidashPartner(models.Model):
                     data.update({
                         'tenant_database': partner.partner_database_name,
                         'tenant_id': partner.partner_primary_id,
-                        'tenant_password': partner.partner_secondary_id
+                        'tenant_password': partner.partner_secondary_id,
+                        'business_id': partner.business_id,
                     })
                     
                 response_data["code"] = 201
@@ -725,6 +770,39 @@ class NaidashPartner(models.Model):
             if tenant_database and tenant_id:
                 self._cleanup_failed_tenant(tenant_database, tenant_id)
             raise
+        
+        
+            # method to look up tenants by business ID
+    def _lookup_tenant_by_business_id(self, business_id):
+            """Look up tenant details by business ID"""
+            partner = self.env['res.partner'].search([
+                ('business_id', '=', business_id),
+                ('company_type', '=', 'company')
+            ], limit=1)
+            
+            if partner:
+                return {
+                    'tenant_database': partner.partner_database_name,
+                    'tenant_id': partner.partner_primary_id,
+                    'partner_id': partner.id,
+                    'creation_date': partner.create_date.strftime('%Y-%m-%d %H:%M:%S')
+                }
+            return None
+        
+        #validation to ensure business IDs are unique
+    def _validate_business_id(self, business_id):
+        """Validate that business ID is unique"""
+        existing = self.env['res.partner'].search_count([
+            ('business_id', '=', business_id)
+        ])
+        
+        if existing > 0:
+            # If duplicate found, add random suffix
+            suffix = "".join(random.choices(string.digits, k=4))
+            new_business_id = f"{business_id}_{suffix}"
+            return self._validate_business_id(new_business_id)
+        
+        return business_id
 
     def _generate_tenant_password(self):
         """Generate a valid tenant password that meets all requirements"""
