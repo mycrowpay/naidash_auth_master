@@ -657,7 +657,7 @@ class NaidashPartner(models.Model):
     # === Main partner creation method ===
     def create_the_partner(self, request_data):
         """Create a partner with tenant setup for companies"""
-        request.httprequest.environ['REQUEST_TIMEOUT'] = 300  # 5 minutes
+        request.httprequest.environ['REQUEST_TIMEOUT'] = 900  # 15 minutes
         try:
             # Initialize response containers
             data = dict()
@@ -711,7 +711,7 @@ class NaidashPartner(models.Model):
                         tenant_database,
                         tenant_id,
                         tenant_password,
-                        timeout=300  # 5 minutes
+                        timeout=900  # 15 minutes
                     )
                     
                     if not tenant_creation_result["success"]:
