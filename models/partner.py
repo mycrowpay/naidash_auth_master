@@ -167,7 +167,7 @@ class NaidashPartner(models.Model):
                 try:
                     # Use sudo for docker-compose operations
                     subprocess.run(
-                        ['sudo', 'docker-compose', 'down'],
+                        ['docker-compose', 'down'],
                         cwd=tenant_dir,
                         check=True,
                         capture_output=True
@@ -178,7 +178,7 @@ class NaidashPartner(models.Model):
                 
                 # Always use sudo for directory removal
                 try:
-                    subprocess.run(['sudo', 'rm', '-rf', tenant_dir], check=True)
+                    subprocess.run(['rm', '-rf', tenant_dir], check=True)
                     logger.info("Tenant directory removed successfully with sudo")
                 except subprocess.CalledProcessError as e:
                     logger.error(f"Failed to remove tenant directory with sudo: {str(e)}")
@@ -332,18 +332,16 @@ class NaidashPartner(models.Model):
     # === Updated tenant creation methods ===
     def _create_tenant_with_timeout(self, script_path, tenant_database, tenant_id, tenant_password, timeout=300):
         """Execute tenant creation with timeout and improved logging"""
-        try:
-            subprocess.run(['sudo', '-v'], check=True)
-            
+        try:            
             # Setup tenants directory with proper permissions
             current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             root_dir = os.path.dirname(os.path.dirname(current_dir))
             tenants_dir = os.path.join(root_dir, 'tenants')
             
             if not os.path.exists(tenants_dir):
-                subprocess.run(['sudo', 'mkdir', '-p', tenants_dir], check=True)
-                subprocess.run(['sudo', 'chown', '-R', f'{os.getuid()}:{os.getgid()}', tenants_dir], check=True)
-                subprocess.run(['sudo', 'chmod', '775', tenants_dir], check=True)
+                subprocess.run(['mkdir', '-p', tenants_dir], check=True)
+                subprocess.run(['chown', '-R', f'{os.getuid()}:{os.getgid()}', tenants_dir], check=True)
+                subprocess.run(['chmod', '775', tenants_dir], check=True)
             
             # Set up environment variables with explicit postgres password
             env = os.environ.copy()
@@ -361,7 +359,7 @@ class NaidashPartner(models.Model):
             try:
                 # Start process with pipe for output
                 process = subprocess.Popen(
-                    ['sudo', script_path, tenant_database.lower(), tenant_id.lower(), tenant_password],
+                    [script_path, tenant_database.lower(), tenant_id.lower(), tenant_password],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
