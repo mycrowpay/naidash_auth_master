@@ -816,6 +816,28 @@ class NaidashPartner(models.Model):
         # Shuffle the password characters
         random.shuffle(password)
         return "".join(password)
+    
+    # API to lookup tenat details by business ID
+    def lookup_tenant_details(self, business_id):
+        """Look up tenant connection details by business ID"""
+        partner = self.env['res.partner'].search([
+            ('business_id', '=', business_id),
+            ('company_type', '=', 'company')
+        ], limit=1)
+        
+        if partner:
+            return {
+                'code': 200,
+                'data': {
+                    'tenant_database': partner.partner_database_name,
+                    'tenant_id': partner.partner_primary_id,
+                    'tenant_url': f'/api/tenant/{business_id}'
+                }
+            }
+        return {
+            'code': 404,
+            'message': 'Tenant not found'
+        }
 
         
     def edit_the_partner(self, partner_id, request_data):
