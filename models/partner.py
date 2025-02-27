@@ -167,7 +167,7 @@ class NaidashPartner(models.Model):
                 try:
                     # Use sudo for docker-compose operations
                     subprocess.run(
-                        ['docker-compose', 'down'],
+                        ['sudo', 'docker-compose', 'down'],
                         cwd=tenant_dir,
                         check=True,
                         capture_output=True
@@ -178,7 +178,7 @@ class NaidashPartner(models.Model):
                 
                 # Always use sudo for directory removal
                 try:
-                    subprocess.run(['rm', '-rf', tenant_dir], check=True)
+                    subprocess.run(['sudo', 'rm', '-rf', tenant_dir], check=True)
                     logger.info("Tenant directory removed successfully with sudo")
                 except subprocess.CalledProcessError as e:
                     logger.error(f"Failed to remove tenant directory with sudo: {str(e)}")
@@ -332,16 +332,18 @@ class NaidashPartner(models.Model):
     # === Updated tenant creation methods ===
     def _create_tenant_with_timeout(self, script_path, tenant_database, tenant_id, tenant_password, timeout=300):
         """Execute tenant creation with timeout and improved logging"""
-        try:            
+        try:
+            subprocess.run(['sudo', '-v'], check=True)
+            
             # Setup tenants directory with proper permissions
             current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             root_dir = os.path.dirname(os.path.dirname(current_dir))
             tenants_dir = os.path.join(root_dir, 'tenants')
             
             if not os.path.exists(tenants_dir):
-                subprocess.run(['mkdir', '-p', tenants_dir], check=True)
-                subprocess.run(['chown', '-R', f'{os.getuid()}:{os.getgid()}', tenants_dir], check=True)
-                subprocess.run(['chmod', '775', tenants_dir], check=True)
+                subprocess.run(['sudo', 'mkdir', '-p', tenants_dir], check=True)
+                subprocess.run(['sudo', 'chown', '-R', f'{os.getuid()}:{os.getgid()}', tenants_dir], check=True)
+                subprocess.run(['sudo', 'chmod', '775', tenants_dir], check=True)
             
             # Set up environment variables with explicit postgres password
             env = os.environ.copy()
@@ -359,7 +361,7 @@ class NaidashPartner(models.Model):
             try:
                 # Start process with pipe for output
                 process = subprocess.Popen(
-                    [script_path, tenant_database.lower(), tenant_id.lower(), tenant_password],
+                    ['sudo', script_path, tenant_database.lower(), tenant_id.lower(), tenant_password],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -655,7 +657,7 @@ class NaidashPartner(models.Model):
     # === Main partner creation method ===
     def create_the_partner(self, request_data):
         """Create a partner with tenant setup for companies"""
-        request.httprequest.environ['REQUEST_TIMEOUT'] = 900  # 15 minutes
+        request.httprequest.environ['REQUEST_TIMEOUT'] = 300  # 5 minutes
         try:
             # Initialize response containers
             data = dict()
@@ -709,7 +711,7 @@ class NaidashPartner(models.Model):
                         tenant_database,
                         tenant_id,
                         tenant_password,
-                        timeout=900  # 15 minutes
+                        timeout=300  # 5 minutes
                     )
                     
                     if not tenant_creation_result["success"]:
@@ -814,6 +816,28 @@ class NaidashPartner(models.Model):
         # Shuffle the password characters
         random.shuffle(password)
         return "".join(password)
+    
+    # API to lookup tenat details by business ID
+    def lookup_tenant_details(self, business_id):
+        """Look up tenant connection details by business ID"""
+        partner = self.env['res.partner'].search([
+            ('business_id', '=', business_id),
+            ('company_type', '=', 'company')
+        ], limit=1)
+        
+        if partner:
+            return {
+                'code': 200,
+                'data': {
+                    'tenant_database': partner.partner_database_name,
+                    'tenant_id': partner.partner_primary_id,
+                    'tenant_url': f'/api/tenant/{business_id}'
+                }
+            }
+        return {
+            'code': 404,
+            'message': 'Tenant not found'
+        }
 
         
     def edit_the_partner(self, partner_id, request_data):
