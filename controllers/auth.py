@@ -267,8 +267,147 @@ class NaidashAuthController(http.Controller):
                     if 'session_id' in response.cookies:
                         session_id = response.cookies['session_id']
                     
-                    # Return session information
+                    # Get user data from result
                     user_data = result.get('result')
+                    
+                    # Initialize roles variables
+                    user_roles = []
+                    user_role = None
+                    
+                    # If we have a session and user_id, fetch groups and tags
+                    if session_id and user_data.get('uid'):
+                        # Include session in cookies for subsequent requests
+                        cookies = {'session_id': session_id}
+                        
+                        # 1. Fetch user groups
+                        groups_url = f"http://localhost:{partner.port}/web/dataset/call_kw"
+                        groups_payload = {
+                            "jsonrpc": "2.0",
+                            "id": 123457,
+                            "params": {
+                                "model": "res.users",
+                                "method": "get_groups_for_external_api",
+                                "args": [user_data.get('uid')],
+                                "kwargs": {}
+                            }
+                        }
+                        
+                        # Make the request to get groups
+                        groups_response = requests.post(
+                            groups_url,
+                            json=groups_payload,
+                            headers={'Content-Type': 'application/json'},
+                            cookies=cookies,
+                            timeout=10
+                        )
+                        
+                        # Extract roles from groups response
+                        if groups_response.status_code == 200:
+                            groups_result = groups_response.json()
+                            if groups_result.get('result'):
+                                # Process groups into roles
+                                groups = groups_result.get('result', [])
+                                for group in groups:
+                                    role_name = group.get('name')
+                                    if isinstance(role_name, dict) and 'en_US' in role_name:
+                                        role_name = role_name['en_US']
+                                    
+                                    # Add to roles array
+                                    user_roles.append({"role": role_name})
+                                    
+                                    # Determine primary role
+                                    if role_name.lower() == 'admin' or role_name.lower() == 'administrator':
+                                        user_role = "Admin"
+                                    elif role_name.lower() == 'client' and not user_role:
+                                        user_role = "Client"
+                                    elif role_name.lower() == 'dispatcher' and not user_role:
+                                        user_role = "Dispatcher"
+                                    elif role_name.lower() == 'rider' and not user_role:
+                                        user_role = "Rider"
+                        
+                        # 2. Fetch partner tags directly
+                        if user_data.get('partner_id'):
+                            partner_id = user_data.get('partner_id')
+                            tags_url = f"http://localhost:{partner.port}/web/dataset/call_kw"
+                            tags_payload = {
+                                "jsonrpc": "2.0",
+                                "id": 123458,
+                                "params": {
+                                    "model": "res.partner",
+                                    "method": "read",
+                                    "args": [[partner_id], ['category_id']],
+                                    "kwargs": {}
+                                }
+                            }
+                            
+                            # Make the request to get partner category IDs
+                            tags_response = requests.post(
+                                tags_url,
+                                json=tags_payload,
+                                headers={'Content-Type': 'application/json'},
+                                cookies=cookies,
+                                timeout=10
+                            )
+                            
+                            # Process tag names
+                            if tags_response.status_code == 200:
+                                tags_result = tags_response.json()
+                                if tags_result.get('result') and tags_result['result']:
+                                    category_ids = tags_result['result'][0].get('category_id', [])
+                                    
+                                    if category_ids:
+                                        # Get tag names
+                                        tag_names_payload = {
+                                            "jsonrpc": "2.0",
+                                            "id": 123459,
+                                            "params": {
+                                                "model": "res.partner.category",
+                                                "method": "read",
+                                                "args": [category_ids, ['name']],
+                                                "kwargs": {}
+                                            }
+                                        }
+                                        
+                                        tag_names_response = requests.post(
+                                            tags_url,
+                                            json=tag_names_payload,
+                                            headers={'Content-Type': 'application/json'},
+                                            cookies=cookies,
+                                            timeout=10
+                                        )
+                                        
+                                        if tag_names_response.status_code == 200:
+                                            tag_names_result = tag_names_response.json()
+                                            if tag_names_result.get('result'):
+                                                for tag in tag_names_result['result']:
+                                                    tag_name = tag.get('name')
+                                                    if isinstance(tag_name, dict) and 'en_US' in tag_name:
+                                                        tag_name = tag_name['en_US']
+                                                    
+                                                    # Add to roles array
+                                                    user_roles.append({"role": tag_name})
+                                                    
+                                                    # Determine primary role from tag name (prioritize tags)
+                                                    if tag_name.lower() in ['admin', 'administrator']:
+                                                        user_role = "Admin"
+                                                    elif tag_name.lower() == 'client' and not user_role:
+                                                        user_role = "Client" 
+                                                    elif tag_name.lower() == 'dispatcher' and not user_role:
+                                                        user_role = "Dispatcher"
+                                                    elif tag_name.lower() == 'rider' and not user_role:
+                                                        user_role = "Rider"
+                    
+                    # If no specific role found but user is admin, set admin role
+                    if not user_role and user_data.get('is_admin'):
+                        user_role = "Admin"
+                    elif not user_role:
+                        user_role = "User"  # Default fallback
+                    
+                    # If no roles found, create a minimal role array with the primary role
+                    if not user_roles:
+                        user_roles = [{"role": user_role}]
+                    
+                    # Return session information with roles
                     return {
                         'success': True,
                         'data': {
@@ -284,7 +423,9 @@ class NaidashAuthController(http.Controller):
                                 'is_system': user_data.get('is_system', False),
                                 'user_context': user_data.get('user_context', {}),
                                 'db': tenant_db,
-                                'session_id': session_id
+                                'session_id': session_id,
+                                'role': user_role,  # Add primary role
+                                'roles': user_roles  # Add roles array
                             }
                         }
                     }

@@ -967,7 +967,7 @@ class NaidashPartner(models.Model):
                 data["phone_verified"] = partner.is_phone_number_verified
                 data["email_verified"] = partner.is_email_verified
                 data["id_verified"] = partner.is_id_number_verified
-                data["total_amount_due"] = partner.payment_amount_due
+                # data["total_amount_due"] = partner.payment_amount_due
                 data["company"] = {"id": partner.company_id.id, "name": partner.company_id.name} if partner.company_id else {}
                 data["tag_ids"] = [{"id": tag.id, "name": tag.name} for tag in partner.category_id] if partner.category_id else []
                 data["profile_photo"] = ""
@@ -1031,7 +1031,7 @@ class NaidashPartner(models.Model):
                     data["phone_verified"] = partner.is_phone_number_verified
                     data["email_verified"] = partner.is_email_verified
                     data["id_verified"] = partner.is_id_number_verified
-                    data["total_amount_due"] = partner.payment_amount_due
+                    # data["total_amount_due"] = partner.payment_amount_due
                     data["company"] = {"id": partner.company_id.id, "name": partner.company_id.name} if partner.company_id else {}
                     data["tag_ids"] = [{"id": tag.id, "name": tag.name} for tag in partner.category_id] if partner.category_id else []
                     
