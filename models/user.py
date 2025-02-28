@@ -342,3 +342,51 @@ class NaidashUser(models.Model):
         base_url = self.env['ir.config_parameter'].sudo().get_param('app_1_base_url')    
         return base_url
     
+    
+    
+    
+    @api.model
+    def get_groups_for_external_api(self, user_id=None):
+        """Get user groups and partner tags for external API consumption"""
+        if user_id:
+            user = self.browse(user_id)
+        else:
+            user = self
+            
+        result = []
+        
+        # Get all groups the user belongs to
+        user_groups = user.groups_id
+        
+        # Format groups for API response
+        for group in user_groups:
+            role_name = group.name
+            # Handle translated names if needed
+            if isinstance(role_name, dict) and 'en_US' in role_name:
+                role_name = role_name['en_US']
+                
+            result.append({
+                'id': group.id,
+                'name': role_name,
+                'category_id': group.category_id.id if group.category_id else False,
+                'category_name': group.category_id.name if group.category_id else False,
+                'source': 'group'
+            })
+        
+        # Add partner tags as roles
+        if user.partner_id and user.partner_id.category_id:
+            for tag in user.partner_id.category_id:
+                tag_name = tag.name
+                if isinstance(tag_name, dict) and 'en_US' in tag_name:
+                    tag_name = tag_name['en_US']
+                    
+                result.append({
+                    'id': tag.id,
+                    'name': tag_name,
+                    'category_id': False,
+                    'category_name': 'Partner Tags',
+                    'source': 'tag'
+                })
+        
+        return result
+    
