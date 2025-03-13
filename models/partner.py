@@ -157,9 +157,9 @@ class NaidashPartner(models.Model):
     
     def _cleanup_failed_tenant(self, tenant_database, tenant_id):
         try:
-            current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            root_dir = os.path.dirname(os.path.dirname(current_dir))
-            tenant_dir = os.path.join(root_dir, 'tenants', tenant_database.lower())
+            # Get the home directory
+            home_dir = os.path.expanduser('~')
+            tenant_dir = os.path.join(home_dir, 'tenants', tenant_database.lower())
             
             logger.info(f"Cleaning up tenant directory: {tenant_dir}")
             
@@ -336,7 +336,10 @@ class NaidashPartner(models.Model):
             # Setup tenants directory with proper permissions
             current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             root_dir = os.path.dirname(os.path.dirname(current_dir))
-            tenants_dir = os.path.join(root_dir, 'tenants')
+
+            # Get the home directory
+            home_dir = os.path.expanduser('~')
+            tenants_dir = os.path.join(home_dir, 'tenants')
             
             if not os.path.exists(tenants_dir):
                 subprocess.run(['mkdir', '-p', tenants_dir], check=True)
