@@ -548,18 +548,24 @@ class NaidashPartner(models.Model):
         
     def _test_tenant_connection(self, tenant_database, tenant_id, tenant_password):
         """Test tenant database connection with retries"""
-        max_attempts = 10
+        max_attempts = 15  # Increased attempts for better reliability
         delay_seconds = 20
         
         # Add initial delay to allow for container startup
         logger.info(f"Waiting {30} seconds for initial container setup...")
         time.sleep(30)
         
+        # Get RDS connection parameters from environment variables
+        rds_host = os.environ.get('RDS_HOST', 'naidash.c1woe0mikr7h.eu-north-1.rds.amazonaws.com')
+        rds_port = int(os.environ.get('RDS_PORT', 5432))
+        rds_user = os.environ.get('RDS_USER', 'naidash')
+        rds_password = os.environ.get('RDS_PASSWORD', '4a*azUp2025%')
+        
         for attempt in range(max_attempts):
             try:
                 logger.info(f"Connection test attempt {attempt + 1} of {max_attempts}")
                 
-                    # Check container status first
+                # Check container status first
                 check_cmd = ['docker', 'inspect', '--format', '{{.State.Status}}', f'{tenant_database.lower()}_odoo']
                 result = subprocess.run(check_cmd, capture_output=True, text=True)
                 if 'running' not in result.stdout:
@@ -575,50 +581,72 @@ class NaidashPartner(models.Model):
                         time.sleep(delay_seconds)
                     continue
                 
-                # 2. Test connection to postgres database
+                # 2. Test connection to RDS postgres database
                 try:
+                    # Changed from local postgres to RDS
                     postgres_conn = psycopg2.connect(
                         dbname='postgres',
-                        user='postgres',
-                        password='postgres',
-                        host='localhost',
+                        user=rds_user,
+                        password=rds_password,
+                        host=rds_host,
+                        port=rds_port,
                         connect_timeout=10
                     )
                     postgres_conn.close()
-                    logger.info("Successfully connected to postgres database")
+                    logger.info(f"Successfully connected to postgres database on {rds_host}")
                 except Exception as e:
-                    logger.error(f"Failed to connect to postgres database: {str(e)}")
+                    logger.error(f"Failed to connect to RDS postgres database: {str(e)}")
                     if attempt < max_attempts - 1:
                         time.sleep(delay_seconds)
                     continue
 
-                # 3. Test Docker container connection with proper environment variables
-                docker_test_cmd = [
-                    'docker', 'exec',
-                    '-e', f'PGPASSWORD={tenant_password}',
-                    f'{tenant_database.lower()}_db',
-                    'psql',
-                    '-h', 'localhost',
-                    '-U', tenant_id.lower(),
-                    '-d', tenant_database.lower(),
-                    '-c', 'SELECT current_database(), current_user;'
-                ]
-                
+                # 3. Test connection to tenant database on RDS
                 try:
-                    docker_result = subprocess.run(
-                        docker_test_cmd,
-                        capture_output=True,
-                        text=True,
-                        check=True
+                    # Direct connection to tenant DB on RDS (more reliable than docker exec)
+                    tenant_conn = psycopg2.connect(
+                        dbname=tenant_database.lower(),
+                        user=rds_user,  # Use RDS user which has permissions to all DBs
+                        password=rds_password,
+                        host=rds_host,
+                        port=rds_port,
+                        connect_timeout=10
                     )
-                    logger.info(f"Docker connection test output: {docker_result.stdout}")
+                    with tenant_conn.cursor() as cur:
+                        cur.execute('SELECT current_database(), current_user;')
+                        result = cur.fetchone()
+                        logger.info(f"Direct tenant DB connection test result: {result}")
+                    tenant_conn.close()
                     return True
-                except subprocess.CalledProcessError as e:
-                    logger.error(f"Docker connection test failed: {e.stderr}")
-                    if attempt < max_attempts - 1:
-                        time.sleep(delay_seconds)
-                    continue
-
+                except Exception as e:
+                    logger.error(f"Direct tenant DB connection test failed: {str(e)}")
+                    
+                    # 4. Fall back to Docker container connection as a last resort
+                    docker_test_cmd = [
+                        'docker', 'exec',
+                        '-e', f'PGPASSWORD={tenant_password}',
+                        f'{tenant_database.lower()}_db',
+                        'psql',
+                        '-h', rds_host,
+                        '-p', str(rds_port),
+                        '-U', rds_user,
+                        '-d', tenant_database.lower(),
+                        '-c', 'SELECT current_database(), current_user;'
+                    ]
+                    
+                    try:
+                        docker_result = subprocess.run(
+                            docker_test_cmd,
+                            capture_output=True,
+                            text=True,
+                            check=True
+                        )
+                        logger.info(f"Docker connection test output: {docker_result.stdout}")
+                        return True
+                    except subprocess.CalledProcessError as e:
+                        logger.error(f"Docker connection test failed: {e.stderr}")
+                        if attempt < max_attempts - 1:
+                            time.sleep(delay_seconds)
+                        continue
             except Exception as e:
                 logger.error(f"Unexpected error during connection test: {str(e)}")
                 if attempt < max_attempts - 1:
@@ -631,24 +659,32 @@ class NaidashPartner(models.Model):
     def _get_postgres_connection(self):
         """Get connection to postgres database"""
         try:
-            # Use environment variables for credentials if available
-            pg_password = os.environ.get('PGPASSWORD', 'postgres')
+            # Use RDS environment variables for remote database connection
+            rds_host = os.environ.get('RDS_HOST', 'naidash.c1woe0mikr7h.eu-north-1.rds.amazonaws.com')
+            rds_port = int(os.environ.get('RDS_PORT', 5432))
+            rds_user = os.environ.get('RDS_USER', 'naidash')
+            rds_password = os.environ.get('RDS_PASSWORD', '4a*azUp2025%')
             
             try:
-                # First try with postgres user
+                # Connect to the AWS RDS PostgreSQL instance
+            
+                logger.info(f"Connecting to remote PostgreSQL at {rds_host}:{rds_port}")
                 return psycopg2.connect(
-                    dbname='postgres',
-                    user='postgres',
-                    password=pg_password,
-                    host='localhost'
+                    dbname='postgres',  
+                    user=rds_user,      
+                    password=rds_password,
+                    host=rds_host,
+                    port=rds_port
                 )
             except psycopg2.OperationalError as e:
-                logger.warning(f"Failed to connect as postgres user: {str(e)}")
-                # Try with current system user
+                logger.warning(f"Failed to connect to RDS PostgreSQL: {str(e)}")
+                
+                # Fall back to local connection only as a last resort
+                logger.warning("Attempting fallback to local PostgreSQL connection")
                 return psycopg2.connect(
                     dbname='postgres',
                     user=os.getenv('USER'),
-                    password=pg_password,
+                    password=os.environ.get('PGPASSWORD', 'postgres'),
                     host='localhost'
                 )
         except psycopg2.OperationalError as e:
@@ -712,7 +748,7 @@ class NaidashPartner(models.Model):
                         tenant_database,
                         tenant_id,
                         tenant_password,
-                        timeout=900  # 15 minutes
+                        timeout=9900  # 15 minutes
                     )
                     
                     if not tenant_creation_result["success"]:
