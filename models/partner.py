@@ -587,41 +587,39 @@ class NaidashPartner(models.Model):
             except Exception as e:
                 logger.error(f"Failed to update admin login: {str(e)}")
                 return False
-                
-            # Step 2: Update the password using Odoo's password hashing
-            # Create a temporary Python script to run inside the Odoo container
-            script_content = f"""
-                import sys
-                import odoo
-                from passlib.context import CryptContext
+                    
+            import textwrap
 
-                # Setup password hashing context
-                pwd_context = CryptContext(schemes=['pbkdf2_sha512'])
-                hashed_password = pwd_context.hash('{tenant_password}')
+            script_content = textwrap.dedent(f"""\
+                    import sys
+                    import odoo
+                    from passlib.context import CryptContext
 
-                # Connect to database
-                try:
-                    registry = odoo.modules.registry.Registry.new('{tenant_database.lower()}')
-                    with registry.cursor() as cr:
-                        # Update the admin user password with proper hashing
-                        cr.execute("UPDATE res_users SET password=%s WHERE login=%s", 
-                                [hashed_password, '{tenant_id.lower()}'])
-                        # Verify the update
-                        cr.execute("SELECT id FROM res_users WHERE login=%s AND active=True", 
-                                ['{tenant_id.lower()}'])
-                        user_id = cr.fetchone()
-                        if user_id:
-                            print(f"Password updated successfully for user ID: {{user_id[0]}}")
-                        else:
-                            print("Failed to verify password update")
-                            sys.exit(1)
-                except Exception as e:
-                    print(f"Error updating password: {{str(e)}}")
-                    sys.exit(1)
+                    # Setup password hashing context
+                    pwd_context = CryptContext(schemes=['pbkdf2_sha512'])
+                    hashed_password = pwd_context.hash('{tenant_password}')
 
-                print("✓ Admin password updated successfully with proper hashing")
-                sys.exit(0)
-                """
+                    try:
+                        registry = odoo.modules.registry.Registry.new('{tenant_database.lower()}')
+                        with registry.cursor() as cr:
+                            cr.execute("UPDATE res_users SET password=%s WHERE login=%s", 
+                                    [hashed_password, '{tenant_id.lower()}'])
+                            cr.execute("SELECT id FROM res_users WHERE login=%s AND active=True", 
+                                    ['{tenant_id.lower()}'])
+                            user_id = cr.fetchone()
+                            if user_id:
+                                print(f"Password updated successfully for user ID: {{user_id[0]}}")
+                            else:
+                                print("Failed to verify password update")
+                                sys.exit(1)
+                    except Exception as e:
+                        print(f"Error updating password: {{str(e)}}")
+                        sys.exit(1)
+
+                    print("✓ Admin password updated successfully with proper hashing")
+                    sys.exit(0)
+                """)
+
             
             # Write the script to a temporary file
             temp_script_path = f"/tmp/update_password_{tenant_database.lower()}.py"
@@ -634,6 +632,7 @@ class NaidashPartner(models.Model):
             
             # Execute the script in the container
             exec_cmd = ['docker', 'exec', container_name, 'python3', '/tmp/update_password.py']
+            logger.info("Executing password update script inside container...")
             result = subprocess.run(exec_cmd, capture_output=True, text=True)
             
             if result.returncode != 0:
