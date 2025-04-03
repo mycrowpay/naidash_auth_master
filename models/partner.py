@@ -542,23 +542,24 @@ class NaidashPartner(models.Model):
     def _verify_tenant_creation(self, tenant_database, tenant_id, tenant_password):
         """Verify tenant creation and update admin password using Odoo's password hashing"""
         try:
-            # Check if containers are running
+            import textwrap
+
             container_name = f"{tenant_database.lower()}_odoo"
+
+            # Step 0: Ensure container is running
             check_cmd = ['docker', 'ps', '--filter', f'name={container_name}', '--format', '{{.Names}}']
             result = subprocess.run(check_cmd, capture_output=True, text=True)
-            
             if container_name not in result.stdout:
                 logger.error(f"Odoo container {container_name} not running")
                 return False
-            
-            # Get RDS connection parameters from environment variables
-            rds_host = os.environ.get('RDS_HOST', 'naidash.c1woe0mikr7h.eu-north-1.rds.amazonaws.com')
-            rds_port = int(os.environ.get('RDS_PORT', 5432))
-            rds_user = os.environ.get('RDS_USER', 'naidash')
-            rds_password = os.environ.get('RDS_PASSWORD', '4a*azUp2025%')
-            
-            # Step 1: Update the login name first through direct database connection
+
+            # Step 1: Update admin login name via direct DB access
             try:
+                rds_host = os.environ.get('RDS_HOST', 'naidash.c1woe0mikr7h.eu-north-1.rds.amazonaws.com')
+                rds_port = int(os.environ.get('RDS_PORT', 5432))
+                rds_user = os.environ.get('RDS_USER', 'naidash')
+                rds_password = os.environ.get('RDS_PASSWORD', '4a*azUp2025%')
+
                 conn = psycopg2.connect(
                     dbname=tenant_database.lower(),
                     user=rds_user,
@@ -568,113 +569,122 @@ class NaidashPartner(models.Model):
                     connect_timeout=10
                 )
                 conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-                
+
                 with conn.cursor() as cur:
-                    # Update the admin user login name
-                    cur.execute(f"UPDATE res_users SET login=%s WHERE login=%s", 
-                            (tenant_id.lower(), 'admin'))
+                    cur.execute("UPDATE res_users SET login=%s WHERE login=%s", (tenant_id.lower(), 'admin'))
                     logger.info(f"Updated admin login to {tenant_id.lower()}")
-                    
-                    # Verify the login was updated
+
                     cur.execute("SELECT login FROM res_users WHERE id=2")
                     result = cur.fetchone()
                     if result and result[0] == tenant_id.lower():
                         logger.info("✓ Admin login updated successfully")
                     else:
                         logger.error(f"Admin login verification failed, got: {result}")
-                        
+
                 conn.close()
             except Exception as e:
                 logger.error(f"Failed to update admin login: {str(e)}")
                 return False
-                    
-            import textwrap
 
-            script_content = textwrap.dedent(f"""\
-                    import sys
-                    import odoo
-                    from passlib.context import CryptContext
+            # Step 2: Retryable password update via script
+            max_attempts = 3
+            delay_seconds = 10
 
-                    # Setup password hashing context
-                    pwd_context = CryptContext(schemes=['pbkdf2_sha512'])
-                    hashed_password = pwd_context.hash('{tenant_password}')
+            for attempt in range(max_attempts):
+                try:
+                    logger.info(f"Attempt {attempt + 1} to update password in container...")
 
-                    try:
-                        registry = odoo.modules.registry.Registry.new('{tenant_database.lower()}')
-                        with registry.cursor() as cr:
-                            cr.execute("UPDATE res_users SET password=%s WHERE login=%s", 
-                                    [hashed_password, '{tenant_id.lower()}'])
-                            cr.execute("SELECT id FROM res_users WHERE login=%s AND active=True", 
-                                    ['{tenant_id.lower()}'])
-                            user_id = cr.fetchone()
-                            if user_id:
-                                print(f"Password updated successfully for user ID: {{user_id[0]}}")
-                            else:
-                                print("Failed to verify password update")
-                                sys.exit(1)
-                    except Exception as e:
-                        print(f"Error updating password: {{str(e)}}")
-                        sys.exit(1)
+                    # Check logs for module loading (avoid writing if still booting)
+                    logs_cmd = ['docker', 'logs', container_name]
+                    logs_result = subprocess.run(logs_cmd, capture_output=True, text=True)
 
-                    print("✓ Admin password updated successfully with proper hashing")
-                    sys.exit(0)
-                """)
+                    if "inconsistent states" in logs_result.stdout or "loading" in logs_result.stdout:
+                        logger.warning("Odoo still initializing... waiting before password update")
+                        time.sleep(delay_seconds)
+                        continue
 
-            
-            # Write the script to a temporary file
-            temp_script_path = f"/tmp/update_password_{tenant_database.lower()}.py"
-            with open(temp_script_path, 'w') as f:
-                f.write(script_content)
-                
-            # Copy the script to the container
-            copy_cmd = ['docker', 'cp', temp_script_path, f"{container_name}:/tmp/update_password.py"]
-            subprocess.run(copy_cmd, check=True, capture_output=True)
-            
-            # Execute the script in the container
-            exec_cmd = ['docker', 'exec', container_name, 'python3', '/tmp/update_password.py']
-            logger.info("Executing password update script inside container...")
-            result = subprocess.run(exec_cmd, capture_output=True, text=True)
-            
-            if result.returncode != 0:
-                logger.error(f"Password update script failed: {result.stderr or result.stdout}")
-                return False
-                
-            logger.info(result.stdout.strip())
-            
-            # Clean up the temporary script
-            os.remove(temp_script_path)
-            
-            # Step 3: Update odoo.conf file
+                    script_content = textwrap.dedent(f"""\
+                        import sys
+                        import odoo
+                        from passlib.context import CryptContext
+
+                        pwd_context = CryptContext(schemes=['pbkdf2_sha512'])
+                        hashed_password = pwd_context.hash('{tenant_password}')
+
+                        try:
+                            registry = odoo.modules.registry.Registry.new('{tenant_database.lower()}')
+                            with registry.cursor() as cr:
+                                cr.execute("UPDATE res_users SET password=%s WHERE login=%s", 
+                                        [hashed_password, '{tenant_id.lower()}'])
+                                cr.execute("SELECT id FROM res_users WHERE login=%s AND active=True", 
+                                        ['{tenant_id.lower()}'])
+                                user_id = cr.fetchone()
+                                if user_id:
+                                    print(f"Password updated successfully for user ID: {{user_id[0]}}")
+                                else:
+                                    print("Failed to verify password update")
+                                    sys.exit(1)
+                        except Exception as e:
+                            print(f"Error updating password: {{str(e)}}")
+                            sys.exit(1)
+
+                        print("✓ Admin password updated successfully with proper hashing")
+                        sys.exit(0)
+                    """)
+
+                    # Save the script
+                    temp_script_path = f"/tmp/update_password_{tenant_database.lower()}.py"
+                    with open(temp_script_path, 'w') as f:
+                        f.write(script_content)
+
+                    # Copy and execute
+                    subprocess.run(['docker', 'cp', temp_script_path, f"{container_name}:/tmp/update_password.py"], check=True)
+                    exec_cmd = ['docker', 'exec', container_name, 'python3', '/tmp/update_password.py']
+                    result = subprocess.run(exec_cmd, capture_output=True, text=True)
+
+                    if result.returncode == 0:
+                        logger.info(result.stdout.strip())
+                        os.remove(temp_script_path)
+                        break  # success
+                    else:
+                        logger.warning(f"Password update script failed:\n{result.stderr or result.stdout}")
+                        os.remove(temp_script_path)
+                        if attempt < max_attempts - 1:
+                            time.sleep(delay_seconds)
+                except Exception as e:
+                    logger.error(f"Exception during password update: {str(e)}")
+                    if attempt < max_attempts - 1:
+                        time.sleep(delay_seconds)
+                    else:
+                        return False
+
+            # Step 3: Update odoo.conf
             if not self._update_odoo_conf(tenant_database, tenant_id, tenant_password):
-                logger.error("Failed to update odoo.conf file")
+                logger.error("Failed to update odoo.conf")
                 return False
-                
-            # Step 4: Restart the Odoo container to apply changes
+
+            # Step 4: Restart container
             restart_cmd = ['docker', 'restart', container_name]
             restart_result = subprocess.run(restart_cmd, capture_output=True, text=True)
-            
             if restart_result.returncode != 0:
-                logger.error(f"Failed to restart Odoo container: {restart_result.stderr}")
+                logger.error(f"Failed to restart container: {restart_result.stderr}")
                 return False
-                
-            # Wait for container to restart
-            logger.info("Waiting for Odoo container to restart...")
+
             time.sleep(30)
-            
-            # Final verification - check if container is running
-            check_cmd = ['docker', 'ps', '--filter', f'name={container_name}', '--format', '{{.Names}}']
+
+            # Step 5: Confirm container running
             result = subprocess.run(check_cmd, capture_output=True, text=True)
-            
             if container_name not in result.stdout:
                 logger.error("Odoo container not running after restart")
                 return False
-                
+
             logger.info("✓ Tenant verification completed successfully")
             return True
-                
+
         except Exception as e:
             logger.error(f"Verification failed: {str(e)}")
             return False
+
     def _update_odoo_conf(self, tenant_database, tenant_id, tenant_password):
         """Update the odoo.conf file with admin credentials"""
         try:
