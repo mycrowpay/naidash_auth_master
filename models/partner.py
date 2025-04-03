@@ -760,6 +760,9 @@ class NaidashPartner(models.Model):
             # Step 4: Set proper permissions on the file
             chmod_cmd = ['docker', 'exec', container_name, 'chmod', '644', '/etc/odoo/odoo.conf']
             subprocess.run(chmod_cmd, check=True, capture_output=True)
+            logger.info("✓ odoo.conf permissions updated")
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"Non-critical: Could not set odoo.conf permissions: {e.stderr.strip()}")
             
             # Step 5: Clean up temporary file
             os.remove(local_conf_path)
